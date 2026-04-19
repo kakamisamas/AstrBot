@@ -398,6 +398,31 @@ class TestBuiltinToolInjection:
         assert req.func_tool is not None
         assert req.func_tool.get_tool("web_search_baidu") is builtin_tool
 
+    @pytest.mark.asyncio
+    async def test_apply_web_search_tools_supports_kimi_provider(
+        self, mock_event, mock_context
+    ):
+        """Test Kimi web search tool injection through the builtin tool manager."""
+        module = ama
+        req = ProviderRequest()
+        mock_context.get_config.return_value = {
+            "provider_settings": {
+                "web_search": True,
+                "websearch_provider": "kimi",
+            }
+        }
+        builtin_tool = MagicMock(spec=FunctionTool)
+        builtin_tool.name = "web_search_kimi"
+        tool_mgr = MagicMock()
+        tool_mgr.get_builtin_tool.return_value = builtin_tool
+        mock_context.get_llm_tool_manager.return_value = tool_mgr
+
+        await module._apply_web_search_tools(mock_event, req, mock_context)
+
+        tool_mgr.get_builtin_tool.assert_called_once_with(module.KimiWebSearchTool)
+        assert req.func_tool is not None
+        assert req.func_tool.get_tool("web_search_kimi") is builtin_tool
+
     def test_proactive_cron_job_tools_uses_builtin_tool_manager(self, mock_context):
         """Test cron tool injection through the builtin tool manager."""
         module = ama

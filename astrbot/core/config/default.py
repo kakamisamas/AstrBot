@@ -111,6 +111,9 @@ DEFAULT_CONFIG = {
         "websearch_bocha_key": [],
         "websearch_brave_key": [],
         "websearch_baidu_app_builder_key": "",
+        "websearch_kimi_api_key": [],
+        "websearch_kimi_api_base": "https://api.moonshot.cn/v1",
+        "websearch_kimi_model": "kimi-k2.5",
         "web_search_link": False,
         "display_reasoning_text": False,
         "identifier": False,
@@ -3185,6 +3188,7 @@ CONFIG_METADATA_3 = {
                             "baidu_ai_search",
                             "bocha",
                             "brave",
+                            "kimi",
                         ],
                         "condition": {
                             "provider_settings.web_search": True,
@@ -3226,6 +3230,34 @@ CONFIG_METADATA_3 = {
                         "hint": "参考：https://console.bce.baidu.com/iam/#/iam/apikey/list",
                         "condition": {
                             "provider_settings.websearch_provider": "baidu_ai_search",
+                        },
+                    },
+                    "provider_settings.websearch_kimi_api_key": {
+                        "description": "Kimi API Key",
+                        "type": "list",
+                        "items": {"type": "string"},
+                        "hint": "Moonshot/Kimi 开放平台 API Key，可添加多个 Key 进行轮询。",
+                        "condition": {
+                            "provider_settings.websearch_provider": "kimi",
+                            "provider_settings.web_search": True,
+                        },
+                    },
+                    "provider_settings.websearch_kimi_api_base": {
+                        "description": "Kimi API Base",
+                        "type": "string",
+                        "hint": "默认值：https://api.moonshot.cn/v1",
+                        "condition": {
+                            "provider_settings.websearch_provider": "kimi",
+                            "provider_settings.web_search": True,
+                        },
+                    },
+                    "provider_settings.websearch_kimi_model": {
+                        "description": "Kimi Search Model",
+                        "type": "string",
+                        "hint": "默认值：kimi-k2.5；Kimi 官方联网搜索会自动禁用 thinking。",
+                        "condition": {
+                            "provider_settings.websearch_provider": "kimi",
+                            "provider_settings.web_search": True,
                         },
                     },
                     "provider_settings.web_search_link": {

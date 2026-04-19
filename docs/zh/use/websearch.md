@@ -13,7 +13,7 @@ AstrBot 内置的网页搜索功能依赖大模型提供 `函数调用` 能力�
 
 等等带有搜索意味的提示让大模型触发调用搜索工具。
 
-AstrBot 当前支持 4 种网页搜索源接入方式：`Tavily`、`BoCha`、`百度 AI 搜索`、`Brave`。
+AstrBot 当前支持 5 种网页搜索源接入方式：`Tavily`、`BoCha`、`百度 AI 搜索`、`Brave`、`Kimi`。
 
 ![image](https://files.astrbot.app/docs/source/images/websearch/image.png)
 
@@ -34,6 +34,14 @@ AstrBot 当前支持 4 种网页搜索源接入方式：`Tavily`、`BoCha`、`�
 ### Brave
 
 前往 Brave Search 获取 API Key，然后填写在相应的配置项。
+
+### Kimi
+
+前往 Moonshot / Kimi 开放平台获取 API Key，然后填写 `Kimi API Key`、`Kimi API Base` 和 `Kimi Search Model`。
+
+默认 API Base 为 `https://api.moonshot.cn/v1`，默认模型为 `kimi-k2.5`。
+
+AstrBot 当前通过 Kimi 官方内置工具 `$web_search` 接入联网搜索。根据 Kimi 官方文档，联网搜索请求会自动关闭 thinking。
 
 如果您使用 Tavily 作为网页搜索源，在 AstrBot ChatUI 上将会获得更好的体验优化，包括引用来源展示等：
 

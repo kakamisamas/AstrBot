@@ -19,6 +19,7 @@ WEB_SEARCH_TOOL_NAMES = [
     "tavily_extract_web_page",
     "web_search_bocha",
     "web_search_brave",
+    "web_search_kimi",
 ]
 _TAVILY_WEB_SEARCH_TOOL_CONFIG = {
     "provider_settings.web_search": True,
@@ -35,6 +36,10 @@ _BRAVE_WEB_SEARCH_TOOL_CONFIG = {
 _BAIDU_WEB_SEARCH_TOOL_CONFIG = {
     "provider_settings.web_search": True,
     "provider_settings.websearch_provider": "baidu_ai_search",
+}
+_KIMI_WEB_SEARCH_TOOL_CONFIG = {
+    "provider_settings.web_search": True,
+    "provider_settings.websearch_provider": "kimi",
 }
 
 
@@ -69,6 +74,7 @@ class _KeyRotator:
 _TAVILY_KEY_ROTATOR = _KeyRotator("websearch_tavily_key", "Tavily")
 _BOCHA_KEY_ROTATOR = _KeyRotator("websearch_bocha_key", "BoCha")
 _BRAVE_KEY_ROTATOR = _KeyRotator("websearch_brave_key", "Brave")
+_KIMI_KEY_ROTATOR = _KeyRotator("websearch_kimi_api_key", "Kimi")
 
 
 def normalize_legacy_web_search_config(cfg) -> None:
@@ -91,6 +97,7 @@ def normalize_legacy_web_search_config(cfg) -> None:
         "websearch_tavily_key",
         "websearch_bocha_key",
         "websearch_brave_key",
+        "websearch_kimi_api_key",
     ):
         value = provider_settings.get(setting_name)
         if isinstance(value, str):
@@ -129,6 +136,92 @@ def _search_result_payload(results: list[SearchResult]) -> str:
         )
         _cache_favicon(result.url, result.favicon)
     return json.dumps({"results": ret_ls}, ensure_ascii=False)
+
+
+def _extract_kimi_search_results(payload: dict | list) -> list[SearchResult]:
+    results: list[SearchResult] = []
+    seen: set[tuple[str, str]] = set()
+    url_keys = ("url", "link", "href", "source_url", "sourceUrl")
+    title_keys = ("title", "name", "site_name", "siteName")
+    snippet_keys = (
+        "snippet",
+        "summary",
+        "content",
+        "description",
+        "text",
+        "excerpt",
+    )
+
+    def _candidate_url(item: dict) -> str:
+        for key in url_keys:
+            value = item.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+        return ""
+
+    def _candidate_text(item: dict, keys: tuple[str, ...]) -> str:
+        for key in keys:
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    def _walk(node) -> None:
+        if isinstance(node, dict):
+            url = _candidate_url(node)
+            if url:
+                title = _candidate_text(node, title_keys) or url
+                snippet = _candidate_text(node, snippet_keys) or title
+                dedupe_key = (title, url)
+                if dedupe_key not in seen:
+                    seen.add(dedupe_key)
+                    results.append(
+                        SearchResult(
+                            title=title,
+                            url=url,
+                            snippet=snippet,
+                        )
+                    )
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
+    return results
+
+
+def _build_kimi_summary_results(query: str, content: str) -> list[SearchResult]:
+    summary = content.strip()
+    if not summary:
+        return []
+    return [
+        SearchResult(
+            title=query.strip() or "Kimi Web Search Summary",
+            url="",
+            snippet=summary,
+        )
+    ]
+
+
+async def _kimi_chat_completion(
+    session: aiohttp.ClientSession,
+    api_base: str,
+    headers: dict,
+    payload: dict,
+) -> dict:
+    async with session.post(
+        f"{api_base}/chat/completions",
+        json=payload,
+        headers=headers,
+    ) as response:
+        if response.status != 200:
+            reason = await response.text()
+            raise Exception(
+                f"Kimi web search failed: {reason}, status: {response.status}",
+            )
+        return await response.json()
 
 
 async def _tavily_search(
@@ -290,6 +383,74 @@ async def _baidu_search(
                 for item in references
                 if item.get("url")
             ]
+
+
+async def _kimi_search(
+    provider_settings: dict,
+    payload: dict,
+) -> list[SearchResult]:
+    kimi_key = await _KIMI_KEY_ROTATOR.get(provider_settings)
+    api_base = str(
+        provider_settings.get("websearch_kimi_api_base", "https://api.moonshot.cn/v1")
+    ).rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {kimi_key}",
+        "Content-Type": "application/json",
+    }
+    async with aiohttp.ClientSession(trust_env=True) as session:
+        data = await _kimi_chat_completion(session, api_base, headers, payload)
+        message = data.get("choices", [{}])[0].get("message", {}) if isinstance(data, dict) else {}
+        tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
+        messages = payload.get("messages", [])
+        query = str(messages[-1].get("content", "")).strip() if messages else ""
+
+        results: list[SearchResult] = []
+        tool_messages: list[dict] = []
+        for tool_call in tool_calls:
+            function = tool_call.get("function", {})
+            if function.get("name") != "$web_search":
+                continue
+            arguments = function.get("arguments", "{}")
+            try:
+                parsed_arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                logger.warning("Failed to decode Kimi web search arguments: %s", arguments)
+                continue
+            results.extend(_extract_kimi_search_results(parsed_arguments))
+            tool_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", ""),
+                    "name": function.get("name", "$web_search"),
+                    "content": json.dumps(parsed_arguments, ensure_ascii=False),
+                }
+            )
+
+        if results:
+            return results
+        if not tool_messages:
+            raise ValueError("Error: Kimi web searcher does not return any results.")
+
+        followup_payload = dict(payload)
+        followup_payload["messages"] = messages + [message, *tool_messages]
+        followup_data = await _kimi_chat_completion(
+            session,
+            api_base,
+            headers,
+            followup_payload,
+        )
+        followup_message = (
+            followup_data.get("choices", [{}])[0].get("message", {})
+            if isinstance(followup_data, dict)
+            else {}
+        )
+        results = _build_kimi_summary_results(
+            query,
+            str(followup_message.get("content", "")),
+        )
+        if not results:
+            raise ValueError("Error: Kimi web searcher does not return any results.")
+        return results
 
 
 @builtin_tool(config=_TAVILY_WEB_SEARCH_TOOL_CONFIG)
@@ -607,10 +768,47 @@ class BaiduWebSearchTool(FunctionTool[AstrAgentContext]):
         return _search_result_payload(results)
 
 
+@builtin_tool(config=_KIMI_WEB_SEARCH_TOOL_CONFIG)
+@pydantic_dataclass
+class KimiWebSearchTool(FunctionTool[AstrAgentContext]):
+    name: str = "web_search_kimi"
+    description: str = (
+        "A web search tool powered by Kimi official built-in web search."
+    )
+    parameters: dict = Field(
+        default_factory=lambda: {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Required. Search query."},
+            },
+            "required": ["query"],
+        }
+    )
+
+    async def call(self, context, **kwargs) -> ToolExecResult:
+        _, provider_settings, _ = _get_runtime(context)
+        if not provider_settings.get("websearch_kimi_api_key", []):
+            return "Error: Kimi API key is not configured in AstrBot."
+
+        payload = {
+            "model": provider_settings.get("websearch_kimi_model", "kimi-k2.5"),
+            "messages": [{"role": "user", "content": kwargs["query"]}],
+            "tools": [{"type": "builtin_function", "function": {"name": "$web_search"}}],
+            "thinking": {"type": "disabled"},
+            "stream": False,
+        }
+
+        results = await _kimi_search(provider_settings, payload)
+        if not results:
+            return "Error: Kimi web searcher does not return any results."
+        return _search_result_payload(results)
+
+
 __all__ = [
     "BaiduWebSearchTool",
     "BochaWebSearchTool",
     "BraveWebSearchTool",
+    "KimiWebSearchTool",
     "TavilyExtractWebPageTool",
     "TavilyWebSearchTool",
     "WEB_SEARCH_TOOL_NAMES",

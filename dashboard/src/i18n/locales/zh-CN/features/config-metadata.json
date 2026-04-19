@@ -131,6 +131,18 @@
           "description": "百度千帆智能云 APP Builder API Key",
           "hint": "参考:[https://console.bce.baidu.com/iam/#/iam/apikey/list](https://console.bce.baidu.com/iam/#/iam/apikey/list)"
         },
+        "websearch_kimi_api_key": {
+          "description": "Kimi API Key",
+          "hint": "Moonshot/Kimi 开放平台 API Key，可添加多个 Key 进行轮询。"
+        },
+        "websearch_kimi_api_base": {
+          "description": "Kimi API Base",
+          "hint": "默认值：https://api.moonshot.cn/v1"
+        },
+        "websearch_kimi_model": {
+          "description": "Kimi Search Model",
+          "hint": "默认值：kimi-k2.5；联网搜索会自动禁用 thinking。"
+        },
         "web_search_link": {
           "description": "显示来源引用"
         }

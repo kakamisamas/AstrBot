@@ -129,6 +129,18 @@
                     "description": "API-ключ Baidu Qianfan APP Builder",
                     "hint": "Ссылка: [https://console.bce.baidu.com/iam/#/iam/apikey/list](https://console.bce.baidu.com/iam/#/iam/apikey/list)"
                 },
+                "websearch_kimi_api_key": {
+                    "description": "API-ключ Kimi",
+                    "hint": "API-ключ платформы Moonshot/Kimi. Можно добавить несколько ключей для ротации."
+                },
+                "websearch_kimi_api_base": {
+                    "description": "Kimi API Base",
+                    "hint": "По умолчанию: https://api.moonshot.cn/v1"
+                },
+                "websearch_kimi_model": {
+                    "description": "Модель поиска Kimi",
+                    "hint": "По умолчанию: kimi-k2.5. Для веб-поиска thinking отключается автоматически."
+                },
                 "web_search_link": {
                     "description": "Показывать ссылки на источники"
                 }

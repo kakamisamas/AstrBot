@@ -65,6 +65,7 @@ class MainAgentHooks(BaseAgentRunHooks[AstrAgentContext]):
                 "web_search_tavily",
                 "web_search_bocha",
                 "web_search_brave",
+                "web_search_kimi",
             ]
             and len(run_context.messages) > 0
             and tool_result

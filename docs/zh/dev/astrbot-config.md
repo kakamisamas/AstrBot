@@ -288,12 +288,13 @@ ID 白名单。填写后，将只处理所填写的 ID 发来的消息事件。�
 
 #### `provider_settings.websearch_provider`
 
-网页搜索提供商类型。默认为 `tavily`。目前支持 `tavily`、`bocha`、`baidu_ai_search`、`brave`。
+网页搜索提供商类型。默认为 `tavily`。目前支持 `tavily`、`bocha`、`baidu_ai_search`、`brave`、`kimi`。
 
 - `tavily`：使用 Tavily 搜索引擎。
 - `bocha`：使用 BoCha 搜索引擎。
 - `baidu_ai_search`：使用百度 AI Search（MCP）。
 - `brave`：使用 Brave Search API。
+- `kimi`：使用 Kimi 官方内置联网搜索工具 `$web_search`。
 
 #### `provider_settings.websearch_tavily_key`
 
@@ -306,6 +307,18 @@ BoCha 搜索引擎的 API Key 列表。使用 `bocha` 作为网页搜索提供�
 #### `provider_settings.websearch_brave_key`
 
 Brave 搜索引擎的 API Key 列表。使用 `brave` 作为网页搜索提供商时需要填写。
+
+#### `provider_settings.websearch_kimi_api_key`
+
+Kimi 开放平台 API Key 列表。使用 `kimi` 作为网页搜索提供商时需要填写。
+
+#### `provider_settings.websearch_kimi_api_base`
+
+Kimi OpenAI 兼容接口地址。默认为 `https://api.moonshot.cn/v1`。
+
+#### `provider_settings.websearch_kimi_model`
+
+Kimi 网页搜索使用的模型。默认为 `kimi-k2.5`。根据 Kimi 官方说明，网页搜索请求会自动禁用 thinking。
 
 #### `provider_settings.web_search_link`
 

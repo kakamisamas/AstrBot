@@ -129,6 +129,18 @@
           "description": "Baidu Qianfan Smart Cloud APP Builder API Key",
           "hint": "Reference: [https://console.bce.baidu.com/iam/#/iam/apikey/list](https://console.bce.baidu.com/iam/#/iam/apikey/list)"
         },
+        "websearch_kimi_api_key": {
+          "description": "Kimi API Key",
+          "hint": "Moonshot/Kimi platform API key. Multiple keys can be added for rotation."
+        },
+        "websearch_kimi_api_base": {
+          "description": "Kimi API Base",
+          "hint": "Default: https://api.moonshot.cn/v1"
+        },
+        "websearch_kimi_model": {
+          "description": "Kimi Search Model",
+          "hint": "Default: kimi-k2.5. Web search automatically disables thinking."
+        },
         "web_search_link": {
           "description": "Display Source Citations"
         }
