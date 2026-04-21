@@ -6,6 +6,8 @@ import datetime
 import json
 import os
 import platform
+import re
+import time
 import zoneinfo
 from collections.abc import Coroutine
 from dataclasses import dataclass, field
@@ -172,6 +174,325 @@ class MainAgentBuildResult:
     reset_coro: Coroutine | None = None
 
 
+AUTO_ROUTE_PROVIDER_ID = "chatmock-local/auto-conservative"
+AUTO_ROUTE_DEFAULT_PROVIDER_ID = "chatmock-local/gpt-5.3-codex-spark-medium"
+AUTO_ROUTE_HEAVY_PROVIDER_ID = "chatmock-local/gpt-5.4-high"
+
+_AUTO_ROUTE_SEARCH_TERMS = (
+    "上网",
+    "联网",
+    "搜索",
+    "搜一下",
+    "搜一搜",
+    "搜搜",
+    "帮我搜",
+    "查一下",
+    "查查",
+    "帮我查",
+    "找资料",
+    "查资料",
+    "官网",
+    "新闻",
+    "最新",
+    "实时",
+)
+_AUTO_ROUTE_GENERIC_ANALYSIS_TERMS = (
+    "分析",
+    "深入分析",
+    "详细分析",
+    "总结",
+    "复盘",
+    "提炼",
+    "归纳",
+    "评价",
+)
+_AUTO_ROUTE_COMPARISON_TERMS = (
+    "对比",
+    "比较",
+    "优缺点",
+    "排序",
+    "打分",
+    "评分",
+    "横评",
+)
+_AUTO_ROUTE_TRUTH_TERMS = (
+    "判断真假",
+    "谁说得对",
+    "谁在骗",
+    "立场",
+    "真假",
+    "真的假的",
+)
+_AUTO_ROUTE_HISTORY_TERMS = (
+    "结合前文",
+    "根据上文",
+    "回顾前面",
+    "结合前面",
+    "结合刚才",
+    "根据刚才",
+    "综合前文",
+)
+_AUTO_ROUTE_LINK_EVAL_TERMS = (
+    "评价",
+    "总结",
+    "解释",
+    "靠不靠谱",
+    "好不好笑",
+    "讲了什么",
+    "值不值得",
+    "真的假的",
+)
+_AUTO_ROUTE_CONFLICT_TERMS = ("到底", "谁", "还是", "真假", "立场", "可信")
+_AUTO_ROUTE_LINK_RE = re.compile(r"https?://|www\.|[a-z0-9.-]+\.[a-z]{2,}(?:/|$)", re.I)
+
+
+@dataclass(slots=True)
+class AutoRouteDecision:
+    session_id: str
+    scope: str
+    default_provider: str
+    selected_provider: str
+    switched: bool
+    explicit_gate: bool
+    route_reason: str
+    matched_signals: list[str]
+    history_weight: str
+    recent_speaker_count: int
+    has_link: bool
+    msg_len_bucket: str
+    route_eval_ms: int
+    search_intent: bool
+    search_only: bool
+
+    def to_trace_payload(self) -> dict:
+        return {
+            "mode": "auto",
+            "session_id": self.session_id,
+            "scope": self.scope,
+            "default_provider": self.default_provider,
+            "selected_provider": self.selected_provider,
+            "switched": self.switched,
+            "explicit_gate": self.explicit_gate,
+            "route_reason": self.route_reason,
+            "matched_signals": list(self.matched_signals),
+            "history_weight": self.history_weight,
+            "recent_speaker_count": self.recent_speaker_count,
+            "has_link": self.has_link,
+            "msg_len_bucket": self.msg_len_bucket,
+            "route_eval_ms": self.route_eval_ms,
+            "search_intent": self.search_intent,
+            "search_only": self.search_only,
+        }
+
+
+def _provider_id(provider: Provider | None) -> str:
+    if provider is None:
+        return ""
+    provider_config = getattr(provider, "provider_config", {}) or {}
+    provider_id = provider_config.get("id")
+    if isinstance(provider_id, str) and provider_id:
+        return provider_id
+    try:
+        meta = provider.meta()
+    except Exception:  # noqa: BLE001
+        return ""
+    meta_id = getattr(meta, "id", "")
+    return meta_id if isinstance(meta_id, str) else ""
+
+
+def _route_scope(event: AstrMessageEvent) -> str:
+    try:
+        return "private" if event.is_private_chat() else "group"
+    except Exception:  # noqa: BLE001
+        return "private" if not event.get_group_id() else "group"
+
+
+def _msg_len_bucket(text: str) -> str:
+    length = len(text)
+    if length >= 160:
+        return "xlong"
+    if length >= 80:
+        return "long"
+    if length >= 30:
+        return "medium"
+    return "short"
+
+
+def _has_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _content_text_length(content) -> int:
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                total += len(str(item.get("text", "")))
+        return total
+    return 0
+
+
+def _infer_history_weight(event: AstrMessageEvent) -> str:
+    req = event.get_extra("provider_request")
+    if not isinstance(req, ProviderRequest) or not req.contexts:
+        return "unknown"
+
+    context_count = len(req.contexts)
+    total_chars = 0
+    for ctx in req.contexts:
+        if not isinstance(ctx, dict):
+            continue
+        total_chars += _content_text_length(ctx.get("content"))
+
+    if context_count >= 40 or total_chars >= 12000:
+        return "heavy"
+    if context_count >= 20 or total_chars >= 6000:
+        return "medium"
+    return "light"
+
+
+def _infer_recent_speaker_count(event: AstrMessageEvent) -> int:
+    value = event.get_extra("route_recent_speaker_count")
+    if isinstance(value, int) and value >= 0:
+        return value
+    return 0
+
+
+def _log_auto_route_decision(decision: AutoRouteDecision) -> None:
+    logger.info(
+        "route_trace stage=decision session_id=%s scope=%s mode=auto "
+        "default_provider=%s selected_provider=%s switched=%s explicit_gate=%s "
+        "route_reason=%s matched_signals=%s history_weight=%s "
+        "recent_speaker_count=%s has_link=%s msg_len_bucket=%s "
+        "search_intent=%s search_only=%s route_eval_ms=%s",
+        decision.session_id,
+        decision.scope,
+        decision.default_provider,
+        decision.selected_provider,
+        decision.switched,
+        decision.explicit_gate,
+        decision.route_reason,
+        ",".join(decision.matched_signals) or "-",
+        decision.history_weight,
+        decision.recent_speaker_count,
+        decision.has_link,
+        decision.msg_len_bucket,
+        decision.search_intent,
+        decision.search_only,
+        decision.route_eval_ms,
+    )
+
+
+def _build_auto_route_decision(event: AstrMessageEvent) -> AutoRouteDecision:
+    started = time.perf_counter()
+    text = ((getattr(event, "message_str", None) or "") if event else "").strip()
+    compact = re.sub(r"\s+", "", text).lower()
+    has_link = bool(_AUTO_ROUTE_LINK_RE.search(text))
+    msg_len_bucket = _msg_len_bucket(text)
+    search_intent = _has_any(compact, _AUTO_ROUTE_SEARCH_TERMS)
+    history_weight = _infer_history_weight(event)
+    recent_speaker_count = _infer_recent_speaker_count(event)
+
+    matched_signals: list[str] = []
+    secondary_signals: list[str] = []
+    if has_link:
+        secondary_signals.append("has_link")
+    if search_intent:
+        secondary_signals.append("search_intent")
+    if msg_len_bucket in {"long", "xlong"}:
+        secondary_signals.append("long_message")
+    if history_weight in {"medium", "heavy"}:
+        secondary_signals.append(f"history_{history_weight}")
+    if recent_speaker_count >= 3:
+        secondary_signals.append("recent_multi_speaker")
+    if _has_any(compact, _AUTO_ROUTE_CONFLICT_TERMS):
+        secondary_signals.append("conflict_markers")
+
+    explicit_gate = False
+    selected_provider = AUTO_ROUTE_DEFAULT_PROVIDER_ID
+    route_reason = "default_keep_spark"
+
+    if has_link and _has_any(compact, _AUTO_ROUTE_LINK_EVAL_TERMS):
+        explicit_gate = True
+        selected_provider = AUTO_ROUTE_HEAVY_PROVIDER_ID
+        route_reason = "link_evaluation_promote_high"
+        matched_signals.append("link_evaluation")
+    elif _has_any(compact, _AUTO_ROUTE_COMPARISON_TERMS):
+        explicit_gate = True
+        selected_provider = AUTO_ROUTE_HEAVY_PROVIDER_ID
+        route_reason = "comparison_promote_high"
+        matched_signals.append("comparison")
+    elif _has_any(compact, _AUTO_ROUTE_TRUTH_TERMS):
+        explicit_gate = True
+        selected_provider = AUTO_ROUTE_HEAVY_PROVIDER_ID
+        route_reason = "truth_judgment_promote_high"
+        matched_signals.append("truth_judgment")
+    elif _has_any(compact, _AUTO_ROUTE_HISTORY_TERMS):
+        explicit_gate = True
+        selected_provider = AUTO_ROUTE_HEAVY_PROVIDER_ID
+        route_reason = "history_analysis_promote_high"
+        matched_signals.append("history_analysis")
+    elif _has_any(compact, _AUTO_ROUTE_GENERIC_ANALYSIS_TERMS):
+        explicit_gate = True
+        matched_signals.append("generic_analysis")
+        if secondary_signals:
+            selected_provider = AUTO_ROUTE_HEAVY_PROVIDER_ID
+            route_reason = "generic_analysis_with_confirmation"
+        else:
+            route_reason = "generic_analysis_without_confirmation_keep_spark"
+    elif search_intent:
+        route_reason = "search_only_keep_spark"
+        matched_signals.append("search_only")
+
+    matched_signals.extend(
+        signal for signal in secondary_signals if signal not in matched_signals
+    )
+    route_eval_ms = int((time.perf_counter() - started) * 1000)
+
+    return AutoRouteDecision(
+        session_id=event.get_session_id(),
+        scope=_route_scope(event),
+        default_provider=AUTO_ROUTE_DEFAULT_PROVIDER_ID,
+        selected_provider=selected_provider,
+        switched=selected_provider != AUTO_ROUTE_DEFAULT_PROVIDER_ID,
+        explicit_gate=explicit_gate,
+        route_reason=route_reason,
+        matched_signals=matched_signals,
+        history_weight=history_weight,
+        recent_speaker_count=recent_speaker_count,
+        has_link=has_link,
+        msg_len_bucket=msg_len_bucket,
+        route_eval_ms=route_eval_ms,
+        search_intent=search_intent,
+        search_only=search_intent and not explicit_gate,
+    )
+
+
+def _resolve_auto_route_provider(
+    event: AstrMessageEvent,
+    plugin_context: Context,
+    requested_provider: Provider,
+) -> Provider:
+    if _provider_id(requested_provider) != AUTO_ROUTE_PROVIDER_ID:
+        return requested_provider
+
+    decision = _build_auto_route_decision(event)
+    event.set_extra("selected_provider", decision.selected_provider)
+    event.set_extra("auto_route_trace", decision.to_trace_payload())
+    _log_auto_route_decision(decision)
+
+    resolved = plugin_context.get_provider_by_id(decision.selected_provider)
+    if isinstance(resolved, Provider):
+        return resolved
+
+    logger.error("未找到自动路由目标提供商: %s。", decision.selected_provider)
+    return requested_provider
+
+
 def _select_provider(
     event: AstrMessageEvent, plugin_context: Context
 ) -> Provider | None:
@@ -181,14 +502,21 @@ def _select_provider(
         provider = plugin_context.get_provider_by_id(sel_provider)
         if not provider:
             logger.error("未找到指定的提供商: %s。", sel_provider)
+            return None
         if not isinstance(provider, Provider):
             logger.error(
                 "选择的提供商类型无效(%s)，跳过 LLM 请求处理。", type(provider)
             )
             return None
-        return provider
+        return _resolve_auto_route_provider(event, plugin_context, provider)
     try:
-        return plugin_context.get_using_provider(umo=event.unified_msg_origin)
+        provider = plugin_context.get_using_provider(umo=event.unified_msg_origin)
+        if not isinstance(provider, Provider):
+            logger.error(
+                "选择的提供商类型无效(%s)，跳过 LLM 请求处理。", type(provider)
+            )
+            return None
+        return _resolve_auto_route_provider(event, plugin_context, provider)
     except ValueError as exc:
         logger.error("Error occurred while selecting provider: %s", exc)
         return None

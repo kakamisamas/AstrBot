@@ -351,6 +351,8 @@ class InternalAgentSubStage(Stage):
                         resp=final_resp.completion_text if final_resp else None,
                     )
 
+                    _log_auto_route_result(event, agent_runner, final_resp)
+
                     asyncio.create_task(
                         _record_internal_agent_stats(
                             event,
@@ -515,3 +517,44 @@ async def _record_internal_agent_stats(
         )
     except Exception as e:
         logger.warning("Persist provider stats failed: %s", e, exc_info=True)
+
+
+def _log_auto_route_result(
+    event: AstrMessageEvent,
+    agent_runner: AgentRunner | None,
+    final_resp: LLMResponse | None,
+) -> None:
+    route_trace = event.get_extra("auto_route_trace")
+    if not isinstance(route_trace, dict) or agent_runner is None:
+        return
+
+    stats = getattr(agent_runner, "stats", None)
+    token_usage = getattr(stats, "token_usage", None)
+    token_input = getattr(token_usage, "input", 0) if token_usage is not None else 0
+    token_output = getattr(token_usage, "output", 0) if token_usage is not None else 0
+    ttft_ms = (
+        int(getattr(stats, "time_to_first_token", 0.0) * 1000) if stats is not None else 0
+    )
+    duration_ms = int(getattr(stats, "duration", 0.0) * 1000) if stats is not None else 0
+
+    if agent_runner.was_aborted():
+        status = "aborted"
+    elif final_resp is not None and final_resp.role == "err":
+        status = "error"
+    else:
+        status = "completed"
+
+    logger.info(
+        "route_trace stage=result session_id=%s selected_provider=%s switched=%s "
+        "elapsed_ms=%s provider_ttft_ms=%s provider_duration_ms=%s "
+        "token_input=%s token_output=%s status=%s",
+        route_trace.get("session_id", event.get_session_id()),
+        route_trace.get("selected_provider", ""),
+        route_trace.get("switched", False),
+        duration_ms,
+        ttft_ms,
+        duration_ms,
+        token_input,
+        token_output,
+        status,
+    )

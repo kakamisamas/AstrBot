@@ -28,6 +28,16 @@ def mock_provider():
     return provider
 
 
+def _make_provider(provider_id: str, model: str = "gpt-4") -> MagicMock:
+    provider = MagicMock(spec=Provider)
+    provider.provider_config = {
+        "id": provider_id,
+        "modalities": ["text", "tool_use"],
+    }
+    provider.get_model.return_value = model
+    return provider
+
+
 @pytest.fixture
 def mock_context():
     """Create a mock Context."""
@@ -71,7 +81,9 @@ def mock_event():
     event.get_platform_name.return_value = "test_platform"
     event.get_platform_id.return_value = "test_platform"
     event.get_group_id.return_value = None
+    event.get_session_id.return_value = "session123"
     event.get_sender_name.return_value = "TestUser"
+    event.is_private_chat.return_value = True
     event.trace = MagicMock()
     event.plugins_name = None
     return event
@@ -217,6 +229,78 @@ class TestSelectProvider:
         result = module._select_provider(mock_event, mock_context)
 
         assert result is None
+
+    def test_select_provider_auto_route_promotes_high(self, mock_event, mock_context):
+        """Auto provider should route explicit heavy tasks to 5.4-high."""
+        module = ama
+        auto_provider = _make_provider(
+            module.AUTO_ROUTE_PROVIDER_ID, module.AUTO_ROUTE_DEFAULT_PROVIDER_ID
+        )
+        high_provider = _make_provider(
+            module.AUTO_ROUTE_HEAVY_PROVIDER_ID, module.AUTO_ROUTE_HEAVY_PROVIDER_ID
+        )
+        providers = {
+            module.AUTO_ROUTE_PROVIDER_ID: auto_provider,
+            module.AUTO_ROUTE_HEAVY_PROVIDER_ID: high_provider,
+        }
+        mock_event.message_str = "对比一下你自己和xcx，细说优缺点"
+        mock_event.get_extra.side_effect = lambda key: (
+            module.AUTO_ROUTE_PROVIDER_ID if key == "selected_provider" else None
+        )
+        mock_context.get_provider_by_id.side_effect = providers.get
+
+        result = module._select_provider(mock_event, mock_context)
+
+        assert result == high_provider
+        mock_event.set_extra.assert_any_call(
+            "selected_provider", module.AUTO_ROUTE_HEAVY_PROVIDER_ID
+        )
+        trace_call = next(
+            call
+            for call in mock_event.set_extra.call_args_list
+            if call.args[0] == "auto_route_trace"
+        )
+        assert trace_call.args[1]["selected_provider"] == module.AUTO_ROUTE_HEAVY_PROVIDER_ID
+
+
+class TestAutoRouteDecision:
+    """Tests for conservative auto routing heuristics."""
+
+    def test_search_only_stays_on_spark(self, mock_event):
+        module = ama
+        mock_event.message_str = "上网查一下明天上海天气"
+        mock_event.get_extra.return_value = None
+
+        decision = module._build_auto_route_decision(mock_event)
+
+        assert decision.selected_provider == module.AUTO_ROUTE_DEFAULT_PROVIDER_ID
+        assert decision.search_intent is True
+        assert decision.search_only is True
+        assert decision.explicit_gate is False
+        assert decision.route_reason == "search_only_keep_spark"
+
+    def test_link_evaluation_promotes_high(self, mock_event):
+        module = ama
+        mock_event.message_str = "评价一下 https://example.com 这链接里的内容好不好笑"
+        mock_event.get_extra.return_value = None
+
+        decision = module._build_auto_route_decision(mock_event)
+
+        assert decision.selected_provider == module.AUTO_ROUTE_HEAVY_PROVIDER_ID
+        assert decision.explicit_gate is True
+        assert decision.route_reason == "link_evaluation_promote_high"
+        assert "link_evaluation" in decision.matched_signals
+
+    def test_generic_analysis_without_confirmation_keeps_spark(self, mock_event):
+        module = ama
+        mock_event.message_str = "简单总结一下"
+        mock_event.get_extra.return_value = None
+
+        decision = module._build_auto_route_decision(mock_event)
+
+        assert decision.selected_provider == module.AUTO_ROUTE_DEFAULT_PROVIDER_ID
+        assert decision.explicit_gate is True
+        assert decision.route_reason == "generic_analysis_without_confirmation_keep_spark"
 
 
 class TestGetSessionConv:
