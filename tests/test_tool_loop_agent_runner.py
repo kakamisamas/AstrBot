@@ -194,6 +194,21 @@ class MockAbortableStreamProvider(MockProvider):
         )
 
 
+class MockReasoningOnlyProvider(MockProvider):
+    def __init__(self, reasoning_content: str = "模型正在思考"):
+        super().__init__()
+        self.reasoning_content = reasoning_content
+
+    async def text_chat(self, **kwargs) -> LLMResponse:
+        self.call_count += 1
+        return LLMResponse(
+            role="assistant",
+            completion_text="",
+            reasoning_content=self.reasoning_content,
+            usage=TokenUsage(input_other=10, output=5),
+        )
+
+
 class MockToolCallProvider(MockProvider):
     def __init__(self, tool_name: str, tool_args: dict[str, str] | None = None):
         super().__init__()
@@ -873,6 +888,41 @@ async def test_empty_output_retries_exhausted_then_uses_fallback_provider(
     assert final_resp.completion_text == "这是我的最终回答"
     assert primary_provider.call_count == runner.EMPTY_OUTPUT_RETRY_ATTEMPTS
     assert fallback_provider.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_reasoning_only_response_materializes_visible_fallback(
+    runner, provider_request, mock_tool_executor, mock_hooks
+):
+    provider = MockReasoningOnlyProvider(reasoning_content="step 1")
+
+    await runner.reset(
+        provider=provider,
+        request=provider_request,
+        run_context=ContextWrapper(context=None),
+        tool_executor=mock_tool_executor,
+        agent_hooks=mock_hooks,
+        streaming=False,
+    )
+
+    responses = []
+    async for response in runner.step_until_done(3):
+        responses.append(response)
+
+    final_resp = runner.get_final_llm_resp()
+    assert final_resp is not None
+    assert final_resp.role == "assistant"
+    assert final_resp.reasoning_content == "step 1"
+    assert final_resp.completion_text
+
+    llm_results = [resp for resp in responses if resp.type == "llm_result"]
+    assert len(llm_results) == 1
+    assert llm_results[0].data["chain"].get_plain_text() == final_resp.completion_text
+
+    last_message = runner.run_context.messages[-1]
+    assert last_message.role == "assistant"
+    assert "step 1" in str(last_message.content)
+    assert final_resp.completion_text in str(last_message.content)
 
 
 @pytest.mark.asyncio

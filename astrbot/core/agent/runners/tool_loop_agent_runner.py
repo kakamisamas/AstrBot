@@ -108,6 +108,9 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         "[SYSTEM: User actively interrupted the response generation. "
         "Partial output before interruption is preserved.]"
     )
+    REASONING_ONLY_FALLBACK_MESSAGE = (
+        "模型未生成最终答复，仅返回了思考内容。请重试，或调整推理配置后再试。"
+    )
     FOLLOW_UP_NOTICE_TEMPLATE = (
         "\n\n[SYSTEM NOTICE] User sent follow-up messages while tool execution "
         "was in progress. Prioritize these follow-up instructions in your next "
@@ -192,6 +195,22 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
         except Exception as e:
             logger.error(f"Error in on_agent_done hook: {e}", exc_info=True)
         self._resolve_unconsumed_follow_ups()
+
+    @classmethod
+    def _materialize_reasoning_only_fallback(cls, llm_resp: LLMResponse) -> None:
+        """Convert reasoning-only replies into a visible assistant message."""
+        has_text_output = bool((llm_resp.completion_text or "").strip())
+        has_reasoning_output = bool(llm_resp.reasoning_content.strip())
+        has_tool_output = bool(llm_resp.tools_call_name)
+        if has_text_output or not has_reasoning_output or has_tool_output:
+            return
+
+        logger.warning(
+            "LLM returned reasoning-only assistant response; materializing fallback text."
+        )
+        llm_resp.result_chain = MessageChain().message(
+            cls.REASONING_ONLY_FALLBACK_MESSAGE
+        )
 
     @override
     async def reset(
@@ -714,6 +733,8 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
             )
             return
 
+        self._materialize_reasoning_only_fallback(llm_resp)
+
         if not llm_resp.tools_call_name:
             await self._complete_with_assistant_response(llm_resp)
 
@@ -739,6 +760,7 @@ class ToolLoopAgentRunner(BaseAgentRunner[TContext]):
                     logger.warning(
                         "skills_like tool re-query returned no tool calls; fallback to assistant response."
                     )
+                    self._materialize_reasoning_only_fallback(llm_resp)
                     if llm_resp.result_chain:
                         yield AgentResponse(
                             type="llm_result",

@@ -92,11 +92,13 @@ class BailianRerankProvider(RerankProvider):
         if normalized_model == self.QWEN3_RERANK_MODEL:
             payload = {
                 "model": self.model,
-                "query": query,
-                "documents": documents,
+                "input": {
+                    "query": query,
+                    "documents": documents,
+                },
             }
             if normalized_top_n is not None:
-                payload["top_n"] = normalized_top_n
+                payload["parameters"] = {"top_n": normalized_top_n}
             if self.instruct:
                 payload["instruct"] = self.instruct
             if self.return_documents:
